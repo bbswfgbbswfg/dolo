@@ -50,12 +50,31 @@ def cartesian(arrays, out=None):
             out[j*m:(j+1)*m,1:] = out[0:m,1:]
     return out
 
-def mlinspace(smin,smax,orders):
+def mlinspace(a,b,orders,out=None):
 
-    if len(orders) == 1:
-        res = np.atleast_2d( np.linspace(np.array(smin),np.array(smax),np.array(orders)) )
-        return res.copy() ## workaround for strange bug
-
+    import numpy
+    
+    sl = [numpy.linspace(a[i],b[i],orders[i]) for i in range(len(a))]
+    
+    if out is None:
+        out = cartesian(sl)
     else:
-        meshes = np.meshgrid( *[np.linspace(smin[i],smax[i],orders[i]) for i in range(len(orders))], indexing='ij' )
-        return np.row_stack( [l.flatten() for l in meshes])
+        cartesian(sl, out)
+
+    return out
+
+def MyJacobian(fun, eps=1e-6):
+
+    def rfun(x):
+        n = len(x)
+        x0 = x.copy()
+        y0 = fun(x)
+        D = np.zeros( (len(y0),len(x0)) )
+        for i in range(n):
+            delta = np.zeros(len(x))
+            delta[i] = eps
+            y1 = fun(x+delta)
+            y2 = fun(x-delta)
+            D[:,i] = (y1 - y2)/eps/2
+        return D
+    return rfun

@@ -1,11 +1,8 @@
 """
-    codegen
-    ~~~~~~~
+Extension to ast that allow ast -> python code generation.
 
-    Extension to ast that allow ast -> python code generation.
-
-    :copyright: Copyright 2008 by Armin Ronacher.
-    :license: BSD.
+:copyright: Copyright 2008 by Armin Ronacher.
+:license: BSD.
 """
 from ast import *
 
@@ -439,9 +436,18 @@ class SourceGenerator(NodeVisitor):
         self.write('}')
 
     def visit_BinOp(self, node):
+        with_parentheses = isinstance(node.op, (Pow, Mult, Div, Sub))
+        if with_parentheses:
+            self.write('(')
         self.visit(node.left)
+        if with_parentheses:
+            self.write(')')
         self.write(' %s ' % BINOP_SYMBOLS[type(node.op)])
+        if with_parentheses:
+            self.write('(')
         self.visit(node.right)
+        if with_parentheses:
+            self.write(')')
 
     def visit_BoolOp(self, node):
         self.write('(')
@@ -452,17 +458,17 @@ class SourceGenerator(NodeVisitor):
         self.write(')')
 
     def visit_Compare(self, node):
-        self.write('(')
+        # self.write('(')
         self.visit(node.left)
         for op, right in zip(node.ops, node.comparators):
             self.write(' %s ' % CMPOP_SYMBOLS[type(op)])
             self.visit(right)
-        self.write(')')
+        # self.write(')')
 
     def visit_UnaryOp(self, node):
-        self.write('(')
         op = UNARYOP_SYMBOLS[type(node.op)]
         self.write(op)
+        self.write('(')
         if op == 'not':
             self.write(' ')
         self.visit(node.operand)
@@ -484,13 +490,13 @@ class SourceGenerator(NodeVisitor):
             self.write(':')
             if not (isinstance(node.step, Name) and node.step.id == 'None'):
                 self.visit(node.step)
-    
+
     def visit_ExtSlice(self, node):
         for idx, item in enumerate(node.dims):
             if idx>0:
                 self.write(', ')
             self.visit(item)
-    
+
     # def visit_ExtSlice(self, node):
     #     for idx, item in node.dims:
     #         if idx:
@@ -581,3 +587,31 @@ class SourceGenerator(NodeVisitor):
 
     def visit_arguments(self, node):
         self.signature(node)
+
+
+
+# tests
+
+def test_generation():
+    import ast
+    from math import exp
+
+    d = dict(a=1.290, b=2.28)
+
+    expressions = [
+        '-(a+b)',
+        'exp(-a)',
+    ]
+
+    print("Testing ast to source")
+    for s in expressions:
+        expr = ast.parse(s)
+        new_s = to_source(expr)
+        print('{} -> {}'.format(s,new_s))
+        lhs = (eval(s, locals(), d))
+        rhs = (eval(new_s, locals(), d))
+        assert(lhs==rhs)
+
+if __name__ == '__main__':
+
+    test_generation()

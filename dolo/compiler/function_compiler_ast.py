@@ -1,5 +1,9 @@
 
+from __future__ import division
+from .codegen import to_source
 
+import sys
+is_python_3 =  sys.version_info >= (3, 0)
 
 def std_date_symbol(s,date):
     if date == 0:
@@ -11,9 +15,57 @@ def std_date_symbol(s,date):
 
 
 import ast
-from ast import Subscript, Name, Load, Index, Num, Module, Assign, Store, Module, FunctionDef, arguments, Param, ExtSlice, Slice, Ellipsis, Call, Str, keyword, NodeTransformer
 
-# import codegen
+from ast import Expr, Subscript, Name, Load, Index, Num, UnaryOp, UAdd, Module, Assign, Store, Call, Module, FunctionDef, arguments, Param, ExtSlice, Slice, Ellipsis, Call, Str, keyword, NodeTransformer, Tuple, USub
+
+# def Name(id=id, ctx=None): return ast.arg(arg=id)
+
+
+class StandardizeDatesSimple(NodeTransformer):
+
+    # replaces calls to variables by time subscripts
+
+    def __init__(self, tvariables):
+
+        self.tvariables = tvariables # list of variables
+        self.variables = [e[0] for e in tvariables]
+
+
+    def visit_Name(self, node):
+
+        name = node.id
+        newname = std_date_symbol(name, 0)
+        if (name,0) in self.tvariables:
+            expr = Name(newname, Load())
+            return expr
+        else:
+            return node
+
+    def visit_Call(self, node):
+
+        name = node.func.id
+        args = node.args[0]
+
+        if name in self.variables:
+            if isinstance(args, UnaryOp):
+                # we have s(+1)
+                if (isinstance(args.op, UAdd)):
+                    args = args.operand
+                    date = args.n
+                elif (isinstance(args.op, USub)):
+                    args = args.operand
+                    date = -args.n
+                else:
+                    raise Exception("Unrecognized subscript.")
+            else:
+                date = args.n
+            newname = std_date_symbol(name, date)
+            if newname is not None:
+                return Name(newname, Load())
+
+        else:
+
+            return Call(func=node.func, args=[self.visit(e) for e in node.args], keywords=node.keywords, starargs=node.starargs, kwargs=node.kwargs)
 
 
 class StandardizeDates(NodeTransformer):
@@ -36,9 +88,8 @@ class StandardizeDates(NodeTransformer):
         table_symbols = { k: (std_date_symbol(*k)) for k in table.keys() }
 
         self.table = table
-        self.variables = variables
+        self.variables = variables # list of vari
         self.table_symbols = table_symbols
-        self.variables = variables
 
 
     def visit_Name(self, node):
@@ -55,8 +106,20 @@ class StandardizeDates(NodeTransformer):
     def visit_Call(self, node):
 
         name = node.func.id
+        args = node.args[0]
         if name in self.variables:
-            date = node.args[0].n
+            if isinstance(args, UnaryOp):
+                # we have s(+1)
+                if (isinstance(args.op, UAdd)):
+                    args = args.operand
+                    date = args.n
+                elif (isinstance(args.op, USub)):
+                    args = args.operand
+                    date = -args.n
+                else:
+                    raise Exception("Unrecognized subscript.")
+            else:
+                date = args.n
             key = (name, date)
             newname = self.table_symbols.get(key)
             if newname is not None:
@@ -64,10 +127,26 @@ class StandardizeDates(NodeTransformer):
             else:
                 raise Exception("Symbol {} incorrectly subscripted with date {}.".format(name, date))
         else:
-            return node
+
+            return Call(func=node.func, args=[self.visit(e) for e in node.args], keywords=node.keywords, starargs=node.starargs, kwargs=node.kwargs)
+
+class ReplaceName(ast.NodeTransformer):
+
+    # replaces names according to definitions
+
+    def __init__(self, defs):
+        self.definitions = defs
+
+    def visit_Name(self, expr):
+        if expr.id in self.definitions:
+            return self.definitions[expr.id]
+        else:
+            return expr
 
 
-def compile_function_ast(expressions, symbols, arg_names, funname='anonymous', data_order='columns', use_numexpr=False):
+def compile_function_ast(expressions, symbols, arg_names, output_names=None, funname='anonymous',
+     data_order='columns', use_numexpr=False, return_ast=False, print_code=False, definitions=None):
+
     '''
     expressions: list of equations as string
     '''
@@ -75,25 +154,24 @@ def compile_function_ast(expressions, symbols, arg_names, funname='anonymous', d
     vectorization_type = 'ellipsis'
     data_order = 'columns'
 
-    table = {}
-    for a in arg_names:
-        t = tuple(a)
+    from collections import OrderedDict
+    table = OrderedDict()
+
+    aa = arg_names
+    if output_names is not None:
+        aa = arg_names + [output_names]
+    for a in aa:
+
         symbol_group = a[0]
         date = a[1]
         an = a[2]
 
         for b in symbols[symbol_group]:
             index = symbols[symbol_group].index(b)
-            table[(b,date)] = (an, date)
 
-
-
-    variables = [k[0] for k in table]
+            table[(b,date)] = (an, index)
 
     table_symbols = { k: (std_date_symbol(*k)) for k in table.keys() }
-
-
-
 
     if data_order is None:
         # standard assignment: i.e. k = s[0]
@@ -101,14 +179,32 @@ def compile_function_ast(expressions, symbols, arg_names, funname='anonymous', d
     elif vectorization_type == 'ellipsis':
         el = Ellipsis()
         if data_order == 'columns':
-                        # column broadcasting: i.e. k = s[...,0]
-            index = lambda x: ExtSlice(dims=[el, Index(value=Num(n=x))])
+            # column broadcasting: i.e. k = s[...,0]
+            if is_python_3:
+                index = lambda x: Index(
+                        value=Tuple(
+                            elts=[el, Num(n=x)],
+                            ctx=Load()
+                        )
+                    )
+            else:
+                index = lambda x: ExtSlice(dims=[el, Index(value=Num(n=x))])
         else:
             # rows broadcasting: i.e. k = s[0,...]
-            index = lambda x: ExtSlice(dims=[Index(value=Num(n=x)),el])
+            if is_python_3:
+                index = lambda x: Index(
+                        value=Tuple(
+                            elts=[Num(n=x), el],
+                            ctx=Load()
+                        )
+                    )
+            else:
+                index = lambda x: ExtSlice(dims=[Index(value=Num(n=x)),el])
 
     # declare symbols
+
     preamble = []
+
     for k in table: # order it
         # k : var, date
         arg,pos = table[k]
@@ -117,126 +213,110 @@ def compile_function_ast(expressions, symbols, arg_names, funname='anonymous', d
         line = Assign(targets=[Name(id=std_name, ctx=Store())], value=val)
         preamble.append(line)
 
-    for i in range(len(expressions)):
+    if use_numexpr:
+        for i in range(len(expressions)):
         # k : var, date
-        val = Subscript(value=Name(id='out', ctx=Load()), slice=index(i), ctx=Load())
-        line = Assign(targets=[Name(id='out_{}'.format(i), ctx=Store())], value=val)
-        preamble.append(line)
-
+            val = Subscript(value=Name(id='out', ctx=Load()), slice=index(i), ctx=Load())
+            line = Assign(targets=[Name(id='out_{}'.format(i), ctx=Store())], value=val)
+            preamble.append(line)
 
     body = []
-    std_dates = StandardizeDates(symbols, arg_names)
+    std_dates = StandardizeDates(symbols, aa)
+
+    if definitions is not None:
+        defs = {e: ast.parse(definitions[e]).body[0].value for e in definitions}
 
     for i,expr in enumerate(expressions):
 
         expr = ast.parse(expr).body[0].value
+        if definitions is not None:
+            expr = ReplaceName(defs).visit(expr)
 
         rexpr = std_dates.visit(expr)
 
         if not use_numexpr:
             rhs = rexpr
         else:
-            import codegen
-            src = codegen.to_source(rexpr)
+            src = to_source(rexpr)
             rhs = Call( func=Name(id='evaluate', ctx=Load()),
                 args=[Str(s=src)], keywords=[keyword(arg='out', value=Name(id='out_{}'.format(i), ctx=Load()))], starargs=None, kwargs=None)
 
-        line = Assign(targets=[Name(id='out_{}'.format(i), ctx=Load())], value=rhs )
 
+        if not use_numexpr:
+            val = Subscript(value=Name(id='out', ctx=Load()), slice=index(i), ctx=Store())
+            line = Assign(targets=[val], value=rhs )
+        else:
+            line = Expr(value=rhs) #Assign(targets=[Name(id='out_{}'.format(i), ctx=Load())], value=rhs )
 
         body.append(line)
 
+        if output_names is not None:
+            varname = symbols[output_names[0]][i]
+            date = output_names[1]
+            out_name = table_symbols[(varname,date)]
+            line = Assign(targets=[Name(id=out_name.format(i), ctx=Store())],
+                          value=Name(id='out_{}'.format(i), ctx=Store()))
+            # body.append(line)
 
 
     args = [e[2] for e in arg_names] + ['out']
 
-    f = FunctionDef(name=funname, args=arguments(args=[Name(id=a, ctx=Param()) for a in args], vararg=None, kwarg=None, defaults=[]),
+    # f = FunctionDef(name=funname, args=arguments(args=[Name(id=a, ctx=Param()) for a in args], vararg=None, kwarg=None, defaults=[]),
+    #             body=preamble+body, decorator_list=[])
+
+    if is_python_3:
+        from ast import arg
+        f = FunctionDef(name=funname, args=arguments(args=[arg(arg=a) for a in args], vararg=None, kwarg=None, kwonlyargs=[], kw_defaults=[], defaults=[]),
                 body=preamble+body, decorator_list=[])
-    
+    else:
+        f = FunctionDef(name=funname, args=arguments(args=[Name(id=a, ctx=Param()) for a in args], vararg=None, kwarg=None, kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=preamble+body, decorator_list=[])
+
+
     mod = Module(body=[f])
     mod = ast.fix_missing_locations(mod)
 
-    return mod
+    print_code = False
+    if print_code:
 
+        s = "Function {}".format(mod.body[0].name)
+        print("-"*len(s))
+        print(s)
+        print("-"*len(s))
 
-if __name__ == '__main__':
+        print( to_source(mod) )
 
+    if return_ast:
+        return mod
+    else:
+        fun = eval_ast(mod)
+        return fun
 
-    s1 = '(x0(1) + x1 / y0)**p0 - (x0(1) + x1 / y0)**(p0-1) '
-    s2 = 'x0 + x1 / y1(1)'
-
-    expressions = [s1,s2]
-
-    from collections import OrderedDict
-
-    symbols = OrderedDict(
-        states = ('x0', 'x1'),
-        controls = ('y0','y1'),
-        parameters = ('p0','p1')
-    )
-
-    arg_names = [
-        ('states', 0, 's'),
-        ('controls', 0, 'x'),
-        ('states', 1, 'S'),
-        ('controls', 1, 'X'),
-        ('parameters', 0, 'p')
-    ]
-
-
-
+def eval_ast(mod):
 
     from numexpr import evaluate
 
-    import time
+    context = {}
 
-
-    s0 = time.time()
-    resp = compile_function_ast([s1,s2], symbols, arg_names, funname='arbitrage', use_numexpr=True)
-    s1 = time.time()
-
-    print(s1-s0)
-
-    import codegen
-    print( codegen.to_source(resp) )
-
-    s0 = time.time()
-    code  = compile(resp, '<string>', 'exec')
-    s1 = time.time()
-
-
-    exec(code)
-    print(s1-s0)
+    context['division'] = division # THAT seems strange !
 
     import numpy
-    N = 10000000
-    s = numpy.ones((N,4))
-    x = numpy.ones((N,4))
-    S = numpy.ones((N,4))
-    X = numpy.ones((N,4))
-    p = numpy.ones((N,4))
-    out = numpy.ones((N,4))
-    out2 = numpy.ones((N,4))
 
-    import time
-    t1 = time.time()
+    context['inf'] = numpy.inf
+    context['maximum'] = numpy.maximum
+    context['minimum'] = numpy.minimum
 
-    for n in range(100):
-        (arbitrage(s,x,S,X,p,out))
-    t2 = time.time()
+    context['exp'] = numpy.exp
+    context['log'] = numpy.log
+    context['sin'] = numpy.sin
+    context['cos'] = numpy.cos
+    context['evaluate'] = evaluate
 
-    from numba import jit
-    # ff = jit(arbitrage)
+    context['abs'] = numpy.abs
 
-    ff = arbitrage
-    ff(s,x,S,X,p,out2)
-    t22 = time.time()
-    ff(s,x,S,X,p,out2)
-
-    t3 = time.time()
-
-
-    print(out)
-    print(out2)
-    print(t2-t1, t3-t22)
-    exit()
+    name = mod.body[0].name
+    mod = ast.fix_missing_locations(mod)
+    code  = compile(mod, '<string>', 'exec')
+    exec(code, context, context)
+    fun = context[name]
+    return fun

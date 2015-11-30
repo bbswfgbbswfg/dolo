@@ -1,66 +1,62 @@
-import unittest
 
-class  ErrorsTestCase(unittest.TestCase):
+def test_omega_errors():
 
-    def test_omega_errors(self):
+        from dolo import yaml_import
+        from dolo.algos.dtcscc.time_iteration import time_iteration as global_solve
 
-        from dolo.misc.yamlfile import yaml_import
-        from dolo.numeric.global_solve import global_solve
+        model = yaml_import('examples/models/rbc.yaml')
 
-        model = yaml_import('examples/global_models/rbc.yaml')
-
-        from dolo.numeric.perturbations_to_states import approximate_controls
+        from dolo.algos.dtcscc.perturbations import approximate_controls
 
         dr = approximate_controls(model)
-        dr_global = global_solve(model, smolyak_order=4, verbose=False, pert_order=1, method='newton', polish=True)
+        dr_global = global_solve(model, smolyak_order=3, verbose=False, pert_order=1)
 
-
-        sigma = model.calibration['covariances']
-
-        # cmodel = CModel(model)
+        sigma = model.covariances
 
         model.sigma = sigma
 
         s_0 = dr.S_bar
 
-        from dolo.numeric.error_measures import  omega
-        res = omega( dr, model, dr_global.bounds, [10,10], time_weight=[50, 0.96,s_0])
+        from dolo.algos.dtcscc.accuracy import  omega
+
+        res_1 = omega( model, dr, orders=[10,10], time_discount=0.96)
+        res_2 = omega( model, dr_global)
+        print(res_1)
+        print(res_2)
 
 
-    def test_denhaan_errors(self):
+def test_denhaan_errors():
 
-        from dolo.misc.yamlfile import yaml_import
-        from dolo.numeric.global_solve import global_solve
+        from dolo import yaml_import
+        from dolo.algos.dtcscc.time_iteration import time_iteration as global_solve
 
-        model = yaml_import('examples/global_models/rbc.yaml')
+        model = yaml_import('examples/models/rbc.yaml')
 
-
-        from dolo.compiler.compiler_global import CModel
-        from dolo.numeric.perturbations_to_states import approximate_controls
+        from dolo.algos.dtcscc.perturbations import approximate_controls
 
         dr = approximate_controls(model)
-        dr_global = global_solve(model, smolyak_order=4, verbose=False, pert_order=1, method='newton', polish=True)
 
+        dr_global = global_solve(model, interp_type='smolyak', smolyak_order=4, verbose=False)
 
-        sigma = model.calibration['covariances']
+        sigma = model.covariances
 
         model.sigma = sigma
 
-        s_0 = dr.S_bar
+        from dolo.algos.dtcscc.accuracy import denhaanerrors
 
-        from dolo.numeric.error_measures import denhaanerrors
+        denerr_1 = denhaanerrors(model, dr)
+        denerr_2 = denhaanerrors(model, dr_global)
 
-        [error_1, error_2] = denhaanerrors(model, dr, s_0)
-        [error_1_glob, error_2_glob] = denhaanerrors(model, dr_global, s_0)
-
-        print(error_1)
-        print(error_1_glob)
-        assert( max(error_1_glob) < 10-7) # errors with solyak colocations at order 4 are very small
-        assert( max(error_2_glob) < 10-7)
+        print(denerr_1)
+        print(denerr_2)
+        print(denerr_2['max_errors'][0])
 
 
+        assert( max(denerr_2['max_errors']) < 10-7) # errors with solyak colocations at order 4 are very small
+        # assert( max(denerr_1['mean_errors']) < 10-7)
 
-        #print errs
+
+
 
 
 
@@ -69,4 +65,6 @@ class  ErrorsTestCase(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+
+    test_denhaan_errors()
+    test_omega_errors()

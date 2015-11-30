@@ -1,216 +1,319 @@
-"""
+import ast
+import codegen
 
-Symbolic expressions can be evaluated by substituting the values of each symbol. It is however an expensive operation
- which becomes very costly when the number of evaluations grows.
+def str_to_expr(s):
+    return ast.parse(s).body[0]
 
-The functions in this module  take a list of symbolic expressions representing a function :math:`R^p \\rightarrow R^n`
-and turn it into an efficient python function, which can be evaluated repeatedly at lower cost. They use one of the next
-libraries for efficient vectorization: `numpy <http://numpy.scipy.org/>`_, `numexpr <http://code.google.com/p/numexpr/>`_ or `theano <http://deeplearning.net/software/theano/>`_:
-
-"""
-
-
-from __future__ import division
-
-
-def compile_multiargument_function(equations, args_list, args_names, parms, diff=False, fname='anonymous_function', default=None):
-    """
-    :param equations: list of sympy expressions
-    :param args_list: list of lists of symbols (e.g. [[a_1,a_2], [b_1,b_2]])
-    :param args_names: list of strings (['a','b']
-    :param parms: list of symbols to be used as parameters
-    :param fname: name of the function to be generated
-    :param diff: include symbolic derivatives in generated function
-    :param vectorize: arguments are vectorized (not parameters)
-    :param return_function: the source of a Matlab function f(a,b,p) where p is a vector of parameters and a, b, arrays
-    :return:
-    """
-
-    template = '{0}(:,{1})'
-
-    sub_list = {}
-
-    for i,args in enumerate(args_list):
-        vec_name = args_names[i]
-        for j,v in enumerate(args):
-            sub_list[v] = template.format(vec_name,j+1)
-
-    for i,p in enumerate(parms):
-        sub_list[p] = '{0}({1})'.format('p',i+1)
-
-    import sympy
-    sub_list[sympy.Symbol('inf')] = 'inf'
+#class WriteMatlab(ast.NodeVisitor):
+#
+#    def visit_BinOp(self,b):
+#        lhs = self.visit(b.left)
+#        rhs = self.visit(b.right)
+#        print( "{} + {}".format(lhs,rhs) ) """
 
 
-    text = '''
-function [{return_names}] = {fname}({args_names}, {param_names}, output)
+def print_matlab(sexpr):
+    from dolo.compiler.codegen import to_source
+    ss = (to_source(sexpr))
+    ss = ss.replace(' ** ', '.^')
+    ss = ss.replace(' * ', '.*')
+    ss = ss.replace(' / ', './')
+    return ss
 
-    if nargin <= {nargs}
-        output = zeros({nargs},1);
-        for i = 1:nargout
-            output(i) = 1;
-        end
-    end
 
-    n = size({var},1);
 
-{content}
-end
-'''
+def compile_function_matlab(equations, symbols, arg_names, output_names=None, funname='anonymous'):
 
-    from dolo.compiler.common import DicPrinter
+    from function_compiler_ast import std_date_symbol
+    from function_compiler_ast import StandardizeDates
 
-    dp = DicPrinter(sub_list)
+    from collections import OrderedDict
+    table = OrderedDict()
 
-    def write_eqs(eq_l, outname='val', default=None):
-        '''Format equations'''
-        if default:
-                eq_block = '    {0} = ' + default + '( n , {1} );\n'
-                eq_block = eq_block.format(outname, len(eq_l))
+    aa = arg_names
+    # if output_names is not None:
+        # aa = arg_names + [output_names]
+    for a in aa:
+
+        symbol_group = a[0]
+        date = a[1]
+        an = a[2]
+
+        for b in symbols[symbol_group]:
+            index = symbols[symbol_group].index(b)
+
+            table[(b,date)] = (an, index)
+
+    table_symbols = { k: (std_date_symbol(*k)) for k in table.keys() }
+
+    code_preamble = ""
+    for k,v in table.iteritems():
+        std_name = table_symbols[k]
+        if v[0] != 'p':
+            code_preamble += "{} = {}(:,{});\n".format(std_name, v[0], v[1]+1)
         else:
-                eq_block = '    {0} = zeros( n, {1} );\n'.format(outname, len(eq_l))
-        for i,eq in enumerate(eq_l):
-            eq_txt = dp.doprint_matlab(eq, vectorize=True)
-            if eq_txt != default:
-                    eq_block += '    {0}(:,{1}) = {2};\n'.format(outname, i+1, eq_txt)
-        return eq_block
+            code_preamble += "{} = {}({});\n".format(std_name, v[0], v[1]+1)
 
-    def write_der_eqs(eq_l,v_l,lhs):
-        '''Format Jacobians'''
-        eq_block = '        {lhs} = zeros( n,{0},{1} );\n'.format(len(eq_l),len(v_l),lhs=lhs)
-        eq_l_d = eqdiff(eq_l,v_l)
-        for i,eqq in enumerate(eq_l_d):
-            for j,eq in enumerate(eqq):
-                s = dp.doprint_matlab( eq, vectorize=True )
-                if s != "0":
-                    eq_block += '        {lhs}(:,{0},{1}) = {2};\n'.format(i+1,j+1,s,lhs=lhs)
-        return eq_block
+    if output_names:
+        out_group, out_time, out_s = output_names
+    else:
+        out_s = 'out'
 
-    content = write_eqs(eq_l=equations, default=default)
+    expressions = []
 
-    content += '''
-    if nargout <= 1
-        return
-    end
-'''
-
-    if diff:
-        for i,a_g in enumerate(args_list):
-            content += "\n    % Derivatives w.r.t: {0}\n\n".format(args_names[i])
-            lhs = 'val_' + args_names[i]
-            content += '    if output({})\n'.format(i+2)
-            content += write_der_eqs(equations, a_g, lhs)
-            content += '    else\n'
-            content += '        val_{} = [];\n'.format(args_names[i])
-            content += '    end;\n'
-
-    return_names = str.join(', ', ['val'] + [ 'val_'+ str(a) for a in args_names] ) if diff else 'val'
-    text = text.format(
-            fname = fname,
-            nargs = len(args_names)+1,
-            var = args_names[0],
-            content = content,
-            return_names = return_names,
-            args_names = str.join(', ', args_names),
-            param_names = 'p'
-            )
-
-#    text = text.replace('+','.+')
-#    text = text.replace('-','.-')
+    code_expr = ""
+    import sympy
+    for i,eq in enumerate(equations):
+        expr = str_to_expr(eq)
+        sd = StandardizeDates(symbols, arg_names)
+        sexpr = sd.visit(expr)
+        expressions.append(sexpr)
+        eq_string = (print_matlab(sexpr))
+        if output_names is None:
+            code_expr += "out(:,{}) = {} ;\n".format(i+1, eq_string)
+        else:
+            out_symbol = symbols[out_group][i]
+            out_name = std_date_symbol(out_symbol, out_time)
+            code_expr += "{} = {} ;\n".format(out_name, eq_string)
+            code_expr += "{}(:,{}) = {} ;\n".format(out_s,i+1, out_name)
 
 
-    return text
-
-def compile_incidence_matrices(equations, args_list):
-    '''Calculate the incidence matrices of a system of equations with respect to several sets of variables and convert it to MATLAB cell array'''
-    from dolo.misc.matlab import value_to_mat
-    text = '''{'''
-    for i,a_g in enumerate(args_list):
-        text += value_to_mat(JacobianStructure(equations,a_g)).replace('[[','[').replace(']]',']') + ' '
-    text += '};'
-    return text
-
-def code_to_function(text, name):
-    d = {}
-    e = {}
-    exec(text, d, e)
-    return e[name]
+    ## temporary code to differentiate equations using sympy
+    if output_names:
+        # solve triangular system
+        sympy_names = [sympy.Symbol(e) for e in symbols[out_group]]
+        eq_dict = OrderedDict()
+        for i,name in enumerate(sympy_names):
+            eq = sympy.sympify(codegen.to_source(expressions[i]))
+            eq_dict[name] = eq.subs(eq_dict)
+        sympy_equations = eq_dict.values()
+    else:
+        sympy_equations = [sympy.sympify(codegen.to_source(expr)) for expr in expressions]
 
 
-def eqdiff(leq,lvars):
-    '''Calculate the Jacobian of the system of equations with respect to a set of variables.'''
-    from sympy import powsimp
-    resp = []
-    for eq in leq:
-        el = [ powsimp(eq.diff(v)) for v in lvars]
-        resp += [el]
-    return resp
+    all_derivatives = OrderedDict()
+    for agn in arg_names:
+        sym_group = agn[0]
+        date = agn[1]
+        short_sym_group =  agn[2]
+        sym_names = [std_date_symbol(s, date) for s in symbols[sym_group]]
+        dvals = []
+        for eq in sympy_equations:
+            deq = []
+            for s in sym_names:
+                sym = sympy.Symbol(s)
+                ddif = (eq.diff(sym))
+                deq.append(ast.parse(str(ddif)).body[0])
+            dvals.append(deq)
+        all_derivatives[short_sym_group] = dvals
+    ## end of temporary code
 
-def JacobianStructure(leq,lvars):
-    '''Calculate the incidence matrix of a system of equations with respect to one set of variables'''
-    from numpy import array
-    jac_struc = array([[0 for i in range(len(leq))] for j in range(len(lvars))])
-    for i in range(len(leq)):
-        for j in range(len(lvars)):
-            if leq[i].diff(lvars[j]) != 0:
-                jac_struc[j][i] = 1
-    jac_struc = jac_struc.T
-    return jac_struc
+    code_dexpr = ""
+    for k,derivs in all_derivatives.iteritems():
+        code_dexpr += '\n%derivatives w.r.t {}\n'.format(k)
+        assign_name = "d_{}".format(k)
+        code_dexpr += '{} = zeros(N,{},{});\n'.format(assign_name, len(derivs), len(derivs[0]))
+        for i in range(len(derivs)):
+            for j in range(len(derivs[0])):
+                eq = derivs[i][j]
+                ss = print_matlab(eq)
+                if ss != '0':
+                    code_dexpr += "{}(:,{},{}) = {};\n".format(assign_name, i+1, j+1, ss)
+
+        code_dexpr += '\n'
+
+    code = """\
+function [{out_s}, {dout_s}] = {funname}({args_list})
+
+%% preamble
+{preamble}
+
+N = size({first_arg},1);
+out = zeros(N,{n_out});
+
+%% equations
+
+{equations}
+
+%% derivatives
+
+if nargout > 1
+{dequations}
+end
+
+end
+""".format(
+    out_s = out_s,
+    dout_s = str.join(', ', ["d_{}".format(e[2]) for e in arg_names]),
+    preamble = code_preamble,
+    funname = funname,
+    args_list = str.join(', ', [e[2] for e in arg_names]),
+    n_out = len(equations),
+    first_arg = arg_names[0][2],
+    equations = code_expr,
+    dequations = code_dexpr
+)
+
+    return code
+
+def compile_model_matlab(model):
+
+    symbolic_model = model.symbolic
+
+    model_spec = symbolic_model.model_spec
+
+    if model_spec != 'fga':
+        raise Exception("For now, only supported model type is fga")
+
+    from collections import OrderedDict
+    code_funs = OrderedDict()
+
+
+    from dolo.compiler.recipes import recipes
+    recipe = recipes['fga']
+    symbols = model.symbols
+
+    for funname, v in recipe['specs'].iteritems():
+
+        spec = v['eqs']
+        if 'complementarities' in v:
+            print("ignoring complementarities")
+
+        target = v.get('target')
+
+        if funname not in symbolic_model.equations:
+            continue
+            # if not spec.get('optional'):
+                # raise Exception("The model doesn't contain equations of type '{}'.".format(funname))
+            # else:
+                # continue
+
+        eq_strings = symbolic_model.equations[funname]
+
+        eq_strings = [eq.split('|')[0].strip() for eq in eq_strings]
+
+        if target is not None:
+            eq_strings = [eq.split('=')[1].strip() for eq in eq_strings]
+        else:
+            for i,eq in enumerate(eq_strings):
+                if '=' in eq:
+                    eq = '({1})-({0})'.format(*eq.split('=')[:2])
+                eq_strings[i] = eq
+
+
+        funcode = compile_function_matlab(eq_strings, symbols,
+                        spec, output_names=target, funname=funname)
+
+        code_funs[funname] = funcode
+
+
+    code = """\
+function [model] = construct_model()
+
+    functions = struct;
+"""
+    for fn in code_funs.keys():
+        code += "    functions.{} = @{};\n".format(fn, fn)
+
+    code += "\n    symbols = struct;\n"
+    for sg, sl in symbols.iteritems():
+        code += "    symbols.{} = {{{}}};\n".format(sg, str.join(',', ["'{}'".format(e) for e in sl]))
+    code += "\n"
+    code += "\n    calibration = struct;"
+    for sg, sl in model.calibration.iteritems():
+        tv = [str(float(e)) for e in sl]
+        tv = '[{}]'.format(str.join(', ', tv))
+        code += "    calibration.{} = {};\n".format(sg, tv);
+
+    # print covariances
+    tv = [str(float(e)) for e in model.covariances.flatten()]
+    tv = '[{}]'.format(str.join(', ', tv))
+    n_c = model.covariances.shape[0]
+    code += "\n    covariances = reshape( {} , {}, {});\n".format(tv, n_c, n_c)
+
+    code += """\
+
+    model = struct;
+    model.functions = functions;
+    model.calibration = calibration;
+    model.symbols = symbols;
+    model.covariances = covariances;
+
+end
+
+"""
+
+    for fn, fc, in code_funs.iteritems():
+        code += '\n'
+        code += fc
+
+    return code
+
 
 
 if __name__ == '__main__':
 
-    import sympy
-    from pprint import pprint
+    s1 = '(x0(1) + x1 / y0)**p0 - (x0(1) + x1 / y0)**(p0-1) '
+    s2 = 'x0 + x1 / y1(+1)'
 
-    [w,x,y,z,t] = vars = sympy.symbols('w, x, y, z, t')
-    [a,b,c,d] = parms = sympy.symbols('a, b, c, d')
+    expressions = [s1,s2]
 
-    [k_1,k_2] = s_sym = sympy.symbols('k_1, k_2')
-    [x_1,x_2] = x_sym = sympy.symbols('x_1, x_2')
+    from collections import OrderedDict
 
-    args_list = [
-        s_sym,
-        x_sym
+    symbols = OrderedDict(
+        states = ('x0', 'x1'),
+        controls = ('y0','y1'),
+        parameters = ('p0','p1')
+    )
+
+    arg_names = [
+        ('states', 0, 's'),
+        ('controls', 0, 'x'),
+        ('states', 1, 'S'),
+        ('controls', 1, 'X'),
+        ('parameters', 0, 'p')
     ]
 
-    from sympy import exp
+    import time
 
-    eqs = [
-        x + y*k_2 + z*exp(x_1 + t),
-        (y + z)**0.3,
-        z,
-        (k_1 + k_2)**0.3,
-        k_2**x_1
+    t0 = time.time()
+    resp = compile_function_matlab([s1,s2], symbols, arg_names) #funname='arbitrage', use_numexpr=True, return_ast=True)
+
+
+    ###
+
+
+    s1 = '(x0(1) + x1 / y0)**p0 - (x0(1) + x1 / y0)**(p0-1) '
+    s2 = 'x0 + x1 / y1'
+
+    expressions = [s1,s2]
+
+    symbols = OrderedDict(
+        states = ('x0', 'x1'),
+        controls = ('y0','y1'),
+        parameters = ('p0','p1')
+    )
+
+    arg_names = [
+        ('states', 0, 's'),
+        ('controls', 0, 'x'),
+        ('states', 1, 'S'),
+        ('parameters', 0, 'p')
     ]
 
-    sdict = {s:eqs[i] for i,s in enumerate(vars) }
+    import time
 
-    from dolo.misc.triangular_solver import solve_triangular_system
-    order = solve_triangular_system(sdict, return_order=True)
+    t0 = time.time()
+    resp = compile_function_matlab([s1,s2], symbols, arg_names, output_names=('controls',1,'Y')) #funname='arbitrage', use_numexpr=True, return_ast=True)
 
-    ordered_vars  = [ v for v in order ]
-    ordered_eqs = [ eqs[vars.index(v)] for v in order ]
+    print(resp)
 
-    pprint(ordered_vars)
-    pprint(ordered_eqs)
+    print('***************#######################************************')
 
+    from dolo import *
+    model = yaml_import('examples/models/rbc.yaml')
 
-
-    #    f = create_fun()
-    #
-    #    test = f(s1,x1,p0)
-    #    print(test)
-    args_names = ['s','x']
-    #
-    #
-    solution = solve_triangular_system(sdict)
-    vals = [sympy.sympify(solution[v]) for v in ordered_vars]
-
-
-    output = compile_multiargument_function( vals, args_list, args_names, parms, diff=True, fname='test' )
-
-    print(output)
-
-    with file('test.m','w') as f:
-        f.write(output)
+    import time
+    t1 = time.time()
+    print( compile_model_matlab(model) )
+    t2 = time.time()
